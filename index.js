@@ -2,11 +2,48 @@ require('dotenv').config();
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const cron = require('node-cron');
+const express = require('express');
 const CommandHandler = require('./commands');
 const db = require('./database');
 
 console.log('🚀 Starting WhatsApp Task Bot...\n');
 
+// CREATE EXPRESS SERVER FOR HEALTH CHECKS
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+let botStatus = {
+    connected: false,
+    lastActivity: new Date(),
+    uptime: 0
+};
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    botStatus.uptime = Math.floor(process.uptime());
+    res.json({
+        status: 'online',
+        whatsapp: botStatus.connected ? 'connected' : 'disconnected',
+        uptime: botStatus.uptime,
+        lastActivity: botStatus.lastActivity,
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
+
+// Keep-alive endpoint
+app.get('/ping', (req, res) => {
+    res.send('pong');
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Health server running on port ${PORT}`);
+});
+
+// WHATSAPP CLIENT SETUP (rest of your existing code)
 const client = new Client({
     authStrategy: new LocalAuth({
         dataPath: './.wwebjs_auth'
@@ -37,10 +74,12 @@ client.on('qr', (qr) => {
 
 client.on('authenticated', () => {
     console.log('✅ Authentication successful!');
+    botStatus.connected = true;
 });
 
 client.on('auth_failure', (msg) => {
     console.error('❌ Authentication failed:', msg);
+    botStatus.connected = false;
 });
 
 client.on('ready', async () => {
@@ -52,6 +91,9 @@ client.on('ready', async () => {
     const info = client.info;
     console.log(`👤 Bot Number: ${info.wid.user}`);
     console.log(`📛 Bot Name: ${info.pushname}\n`);
+    
+    botStatus.connected = true;
+    botStatus.lastActivity = new Date();
 });
 
 client.on('message_create', async (message) => {
@@ -67,7 +109,8 @@ client.on('message_create', async (message) => {
 
         const sender = message.author || message.from;
         console.log(`📨 Command: ${message.body} from ${sender}`);
-
+        
+        botStatus.lastActivity = new Date();
         await commandHandler.handle(message);
     } catch (error) {
         console.error('❌ Error handling message:', error);
@@ -77,12 +120,14 @@ client.on('message_create', async (message) => {
 client.on('disconnected', (reason) => {
     console.log('❌ Disconnected:', reason);
     console.log('🔄 Reconnecting...');
+    botStatus.connected = false;
 });
 
-// Task reminder every 90 minutes (1.5 hours)
+// CRON JOBS (your existing cron jobs here)
 cron.schedule('*/90 * * * *', async () => {
     try {
         console.log('⏰ Sending task reminders...');
+        botStatus.lastActivity = new Date();
         
         const allTasks = db.getAllTasks();
         const chats = await client.getChats();
@@ -125,7 +170,6 @@ cron.schedule('*/90 * * * *', async () => {
                     reminder += `_Use !complete [TaskID] when done_\n`;
                     reminder += `_Next reminder in 1.5 hours_`;
 
-                    // Send to first group only
                     await targetGroups[0].sendMessage(reminder);
                     await new Promise(resolve => setTimeout(resolve, 3000));
                 } catch (err) {
@@ -142,6 +186,7 @@ cron.schedule('*/90 * * * *', async () => {
 cron.schedule('0 9 * * *', async () => {
     try {
         console.log('🌅 Sending morning motivation...');
+        botStatus.lastActivity = new Date();
         
         const allTasks = db.getAllTasks();
         let totalPending = 0;
@@ -178,6 +223,7 @@ cron.schedule('0 9 * * *', async () => {
 cron.schedule('0 * * * *', async () => {
     try {
         console.log('⏰ Checking deadlines...');
+        botStatus.lastActivity = new Date();
         
         const tasks = db.getTasksByDeadline();
         const urgentTasks = tasks.filter(t => !t.overdue && t.hoursUntil < 24 && t.hoursUntil > 0);
@@ -206,6 +252,17 @@ cron.schedule('0 * * * *', async () => {
         }
     } catch (error) {
         console.error('Error checking deadlines:', error);
+    }
+});
+
+// SELF-PING TO PREVENT SLEEP (keeps bot awake)
+cron.schedule('*/10 * * * *', async () => {
+    try {
+        // Ping self every 10 minutes to prevent Render sleep
+        console.log('🔄 Keep-alive ping');
+        botStatus.lastActivity = new Date();
+    } catch (error) {
+        console.error('Keep-alive error:', error);
     }
 });
 
